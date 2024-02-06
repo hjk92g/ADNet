@@ -11,15 +11,17 @@ class FewShotSeg(nn.Module):
         super().__init__()
 
         # Encoder
-        self.encoder = TVDeeplabRes101Encoder(use_coco_init)
+        self.encoder = TVDeeplabRes101Encoder(use_coco_init) ### 256 feature dimension???
         self.device = torch.device('cuda')
         self.t = Parameter(torch.Tensor([-10.0]))
-        self.scaler = 20.0
+        self.scaler = 20.0  ### Parameter alpha
         self.criterion = nn.NLLLoss()
 
     def forward(self, supp_imgs, fore_mask, qry_imgs, train=False, t_loss_scaler=1):
         """
         Args:
+            ### B: batch_size
+            ### N: query size
             supp_imgs: support images
                 way x shot x [B x 3 x H x W], list of lists of tensors
             fore_mask: foreground masks for support images
@@ -27,15 +29,15 @@ class FewShotSeg(nn.Module):
             back_mask: background masks for support images
                 way x shot x [B x H x W], list of lists of tensors
             qry_imgs: query images
-                N x [B x 3 x H x W], list of tensors
+                N x [B x 3 x H x W], list of tensors ###Shouldn't it be N x[3 x H x W]???
         """
 
         n_ways = len(supp_imgs)
         self.n_shots = len(supp_imgs[0])
         n_queries = len(qry_imgs)
-        batch_size_q = qry_imgs[0].shape[0]
+        batch_size_q = qry_imgs[0].shape[0] ### Is it possible to "batch_size_q!=batch_size"???
         batch_size = supp_imgs[0][0].shape[0]
-        img_size = supp_imgs[0][0].shape[-2:]
+        img_size = supp_imgs[0][0].shape[-2:] ### [H, W] or [3, H, W]???
 
         # ###### Extract features ######
         imgs_concat = torch.cat([torch.cat(way, dim=0) for way in supp_imgs]
@@ -46,11 +48,15 @@ class FewShotSeg(nn.Module):
 
         supp_fts = img_fts[:n_ways * self.n_shots * batch_size].view(
             n_ways, self.n_shots, batch_size, -1, *fts_size)  # Wa x Sh x B x C x H' x W'
+        ### Wa: way, Sh: shot, C: channel (feature) dimension? H', W': height and width after applying CNN encoder
+        ### Shouldn't it be "Wa x Sh x B x C x (H'*W')"???
         qry_fts = img_fts[n_ways * self.n_shots * batch_size:].view(
             n_queries, batch_size_q, -1, *fts_size)  # N x B x C x H' x W'
+        ### Shouldn't it be "N x B x C x (H'*W')"???
 
         fore_mask = torch.stack([torch.stack(way, dim=0)
                                  for way in fore_mask], dim=0)  # Wa x Sh x B x H' x W'
+        ### Shouldn't it be "Wa x Sh x B x H x W"?
 
         ###### Compute loss ######
         align_loss = torch.zeros(1).to(self.device)
@@ -60,22 +66,22 @@ class FewShotSeg(nn.Module):
             ###### Extract prototypes ######
             supp_fts_ = [[self.getFeatures(supp_fts[way, shot, [epi]],
                                            fore_mask[way, shot, [epi]])
-                          for shot in range(self.n_shots)] for way in range(n_ways)]
+                          for shot in range(self.n_shots)] for way in range(n_ways)] ### getFeatures: get feature vectros using masked area
 
-            fg_prototypes = self.getPrototype(supp_fts_)
+            fg_prototypes = self.getPrototype(supp_fts_) ### getPrototype(): just average & not l2 normalized
 
             ###### Compute anom. scores ######
-            anom_s = [self.negSim(qry_fts[epi], prototype) for prototype in fg_prototypes]
+            anom_s = [self.negSim(qry_fts[epi], prototype) for prototype in fg_prototypes] ### negSim: -alpha*cos_sim(q_fts,proto)
 
             ###### Get threshold #######
-            self.thresh_pred = [self.t for _ in range(n_ways)]
+            self.thresh_pred = [self.t for _ in range(n_ways)] ### Threshold T
             self.t_loss = self.t / self.scaler
 
             ###### Get predictions #######
-            pred = self.getPred(anom_s, self.thresh_pred)  # N x Wa x H' x W'
+            pred = self.getPred(anom_s, self.thresh_pred)  # N x Wa x H' x W' ### Foreground class probability: 1-sigmoid(S(,)-T)
 
-            pred_ups = F.interpolate(pred, size=img_size, mode='bilinear', align_corners=True)
-            pred_ups = torch.cat((1.0 - pred_ups, pred_ups), dim=1)
+            pred_ups = F.interpolate(pred, size=img_size, mode='bilinear', align_corners=True) ### N x Wa x H x W???
+            pred_ups = torch.cat((1.0 - pred_ups, pred_ups), dim=1) ### Softmax version of probability
 
             outputs.append(pred_ups)
 
@@ -94,6 +100,7 @@ class FewShotSeg(nn.Module):
         """
         Calculate the distance between features and prototypes
 
+        ### C: channel dimension
         Args:
             fts: input features
                 expect shape: N x C x H x W
@@ -114,7 +121,7 @@ class FewShotSeg(nn.Module):
             mask: binary mask, expect shape: 1 x H x W
         """
 
-        fts = F.interpolate(fts, size=mask.shape[-2:], mode='bilinear')
+        fts = F.interpolate(fts, size=mask.shape[-2:], mode='bilinear') ### 1 x C x H x W?
 
         # masked fg features
         masked_fts = torch.sum(fts * mask[None, ...], dim=(2, 3)) \
@@ -136,7 +143,7 @@ class FewShotSeg(nn.Module):
         n_ways, n_shots = len(fg_fts), len(fg_fts[0])
         fg_prototypes = [torch.sum(torch.cat([tr for tr in way], dim=0), dim=0, keepdim=True) / n_shots for way in
                          fg_fts]  ## concat all fg_fts
-
+        ### fg_prototypes: just averaged and not l2 normalized
         return fg_prototypes
 
     def alignLoss(self, qry_fts, pred, supp_fts, fore_mask):
@@ -145,10 +152,11 @@ class FewShotSeg(nn.Module):
         # Mask and get query prototype
         pred_mask = pred.argmax(dim=1, keepdim=True)  # N x 1 x H' x W'
         binary_masks = [pred_mask == i for i in range(1 + n_ways)]
-        skip_ways = [i for i in range(n_ways) if binary_masks[i + 1].sum() == 0]
+        skip_ways = [i for i in range(n_ways) if binary_masks[i + 1].sum() == 0] ###Skipping blank mask???
         pred_mask = torch.stack(binary_masks, dim=1).float()  # N x (1 + Wa) x 1 x H' x W'
         qry_prototypes = torch.sum(qry_fts.unsqueeze(1) * pred_mask, dim=(0, 3, 4))
         qry_prototypes = qry_prototypes / (pred_mask.sum((0, 3, 4)) + 1e-5)  # (1 + Wa) x C
+        ###Just average & not l2 normalized
 
         # Compute the support loss
         loss = torch.zeros(1).to(self.device)
