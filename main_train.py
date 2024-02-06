@@ -12,9 +12,9 @@ import torch.utils.data
 import torch.utils.data.distributed
 from torch.optim.lr_scheduler import MultiStepLR
 
-from models.fewshot_anom import FewShotSeg
+from models.fewshot_anom import FewShotSeg ### Major functions (forward, negSim, getPrototype, ...)
 from dataloading.datasets import TrainDataset as TrainDataset
-from utils import *
+from utils import * ### Minor functions (logger, evaluation metrics: Dice, IOU scores, ...)
 
 
 def parse_arguments():
@@ -22,7 +22,7 @@ def parse_arguments():
     parser.add_argument('--data_root', type=str, required=True)
     parser.add_argument('--save_root', type=str, required=True)
     parser.add_argument('--dataset', type=str, required=True)
-    parser.add_argument('--n_sv', type=int, required=True)
+    parser.add_argument('--n_sv', type=int, required=True) ### Not used???
     parser.add_argument('--fold', type=int, required=True)
 
     # Training specs.
@@ -32,13 +32,14 @@ def parse_arguments():
     parser.add_argument('--n_query', default=1, type=int)
     parser.add_argument('--n_way', default=1, type=int)
     parser.add_argument('--batch-size', default=1, type=int)
-    parser.add_argument('--max_iterations', default=1000, type=int)
+    parser.add_argument('--max_iterations', default=1000, type=int) ### Training epochs
     parser.add_argument('--lr', default=1e-3, type=float)
-    parser.add_argument('--lr_gamma', default=0.95, type=float)
+    ### Paper: a learning rate of 1e-3 with a decay rate of 0.98 per 1k epochs, and a weight decay of 5e-4 over 50k iterations
+    parser.add_argument('--lr_gamma', default=0.95, type=float) ### Paper: 0.98 ???
     parser.add_argument('--momentum', default=0.9, type=float)
     parser.add_argument('--weight-decay', default=0.0005, type=float)
     parser.add_argument('--seed', default=None, type=int)
-    parser.add_argument('--bg_wt', default=0.1, type=float)
+    parser.add_argument('--bg_wt', default=0.1, type=float) ### Background classs weight to address class imbalance (Foreground classs weight=1)
     parser.add_argument('--t_loss_scaler', default=1.0, type=float)
 
     return parser.parse_args()
@@ -61,7 +62,7 @@ def main():
     args.save_model_path = os.path.join(args.save_root, 'model.pth')
 
     # Init model.
-    model = FewShotSeg(False)
+    model = FewShotSeg(False) ###
     model = nn.DataParallel(model.cuda())
 
     # Init optimizer.
@@ -69,7 +70,7 @@ def main():
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
     milestones = [(ii + 1) * 1000 for ii in range(args.steps // 1000 - 1)]
-    scheduler = MultiStepLR(optimizer, milestones=milestones, gamma=args.lr_gamma)
+    scheduler = MultiStepLR(optimizer, milestones=milestones, gamma=args.lr_gamma) ### pytorch: Decays the learning rate of each parameter group by gamma once the number of epoch reaches one of the milestones.
 
     # Define loss function.
     my_weight = torch.FloatTensor([args.bg_wt, 1.0]).cuda()
@@ -87,14 +88,14 @@ def main():
                 str([elem[len(args.data_root):] for elem in train_dataset.image_dirs]))
 
     # Start training.
-    sub_epochs = args.steps // args.max_iterations
+    sub_epochs = args.steps // args.max_iterations ### It seems to be based on episode -> Maybe we can use actual epochs?
     logger.info('  Start training ...')
 
     for epoch in range(sub_epochs):
 
         # Train.
         batch_time, data_time, losses, q_loss, align_loss, t_loss = train(train_loader, model, criterion, optimizer,
-                                                                          scheduler, args)
+                                                                          scheduler, args) ### losses, q_loss, align_loss, t_loss -> see Log (logger.info) below
 
         # Log
         logger.info('============== Epoch [{}] =============='.format(epoch))
@@ -139,7 +140,7 @@ def train(train_loader, model, criterion, optimizer, scheduler, args):
 
         # Compute outputs and losses.
         query_pred, align_loss, thresh_loss = model(support_images, support_fg_mask, query_images,
-                                                    train=True, t_loss_scaler=args.t_loss_scaler)
+                                                    train=True, t_loss_scaler=args.t_loss_scaler) ### FewShotSeg()
 
         query_loss = criterion(torch.log(torch.clamp(query_pred, torch.finfo(torch.float32).eps,
                                                      1 - torch.finfo(torch.float32).eps)), query_labels)
